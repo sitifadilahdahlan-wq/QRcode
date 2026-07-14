@@ -263,4 +263,549 @@
 
                         <!-- Code block -->
                         <div class="relative mt-3">
-                            <button onclick="copyAppsScriptCode()" class="absolute top-3 right-3 p
+                            <button onclick="copyAppsScriptCode()" class="absolute top-3 right-3 p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs flex items-center gap-1 transition-all">
+                                <i data-lucide="copy" class="w-3.5 h-3.5"></i> Salin Kode
+                            </button>
+                            <pre class="bg-slate-950 text-slate-200 p-4 rounded-xl text-xs overflow-x-auto font-mono leading-relaxed" id="apps-script-code-block">
+/* KODE BACKEND GOOGLE APPS SCRIPT (Code.gs) */
+
+function doGet(e) {
+  // Jika diakses langsung via browser, tampilkan UI HTML
+  return HtmlService.createHtmlOutputFromFile('index')
+      .setTitle('QR Scanner Pro')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+// Handler untuk integrasi Standalone Web App URL (menggunakan POST)
+function doPost(e) {
+  try {
+    var params = JSON.parse(e.postData.contents);
+    var qrData = params.qrData;
+    var timestamp = params.timestamp || new Date();
+    
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("ScanData") || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    sheet.appendRow([timestamp, qrData]);
+    
+    return ContentService.createTextOutput(JSON.stringify({ "status": "success" }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ "status": "error", "message": error.toString() }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Handler untuk integrasi Native Apps Script Container (via google.script.run)
+function saveScanToSheet(qrData) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("ScanData") || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    sheet.appendRow([new Date(), qrData]);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.toString() };
+  }
+}
+                            </pre>
+                        </div>
+
+                        <ol start="4" class="space-y-3 text-sm list-decimal list-inside text-slate-600 dark:text-slate-300 mt-4">
+                            <li>Jika ingin menggunakan mode <strong class="text-slate-800 dark:text-white">Native</strong>, buat file HTML baru di editor Apps Script Anda, beri nama <code class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-900 font-mono rounded">index</code>, dan paste seluruh isi file HTML ini ke sana.</li>
+                            <li>Deploy sebagai Web App dengan mengeklik tombol <strong class="text-slate-800 dark:text-white">Terapkan (Deploy) &gt; Penerapan Baru</strong>.</li>
+                            <li>Pilih jenis <strong class="text-slate-800 dark:text-white">Aplikasi Web</strong>, atur akses "Siapa saja yang memiliki akun Google" atau "Siapa saja (Anyone)" tergantung preferensi privasi Anda, lalu klik Terapkan.</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Scripting Area -->
+    <script>
+        // Global variables & state management
+        let html5QrCode = null;
+        let isFlashOn = false;
+        let scanHistory = JSON.parse(localStorage.getItem('qr_scan_history') || '[]');
+        let connectionMode = localStorage.getItem('qr_connection_mode') || 'standalone'; // standalone | native
+        let endpointUrl = localStorage.getItem('qr_endpoint_url') || '';
+
+        // Initialize UI Elements & State
+        document.addEventListener('DOMContentLoaded', () => {
+            // Render Lucide Icons
+            lucide.createIcons();
+            
+            // Check storage defaults
+            updateHistoryUI();
+            
+            // Populate config elements
+            document.getElementById('gas-endpoint-url').value = endpointUrl;
+            setConnectionMode(connectionMode);
+            
+            // Auto detect if running natively inside Apps Script container
+            if (typeof google !== 'undefined' && google.script && google.script.run) {
+                setConnectionMode('native');
+                showToast('Terdeteksi dijalankan di dalam Google Apps Script!', 'success');
+            }
+        });
+
+        // Tab Switcher Controller
+        function switchTab(tabId) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(el => {
+                el.classList.add('hidden');
+                el.classList.remove('block');
+            });
+            
+            // Deactivate all tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('border-indigo-600', 'text-indigo-600', 'dark:text-indigo-400');
+                btn.classList.add('border-transparent', 'text-slate-500', 'dark:text-slate-400');
+            });
+
+            // Show selected tab content
+            document.getElementById(tabId).classList.remove('hidden');
+            document.getElementById(tabId).classList.add('block');
+
+            // Activate current tab button
+            const activeBtn = document.getElementById(`btn-${tabId}`);
+            activeBtn.classList.remove('border-transparent', 'text-slate-500', 'dark:text-slate-400');
+            activeBtn.classList.add('border-indigo-600', 'text-indigo-600', 'dark:text-indigo-400');
+
+            // Handle Camera Lifecycle when changing tabs
+            if (tabId !== 'camera-tab') {
+                stopScanning();
+            }
+        }
+
+        // Camera Scanner Functions
+        function startScanning() {
+            document.getElementById('camera-idle-screen').classList.add('hidden');
+            
+            html5QrCode = new Html5Qrcode("interactive-scanner");
+            
+            const qrCodeSuccessCallback = (decodedText, decodedResult) => {
+                // Play feedback beep sound
+                playSuccessBeep();
+                
+                // Show latest scan on UI
+                displayScanResult(decodedText);
+                
+                // Save Scan to local history
+                saveToHistory(decodedText);
+                
+                // Send scan result to Google Sheets
+                sendDataToAppsScript(decodedText);
+
+                // Temporarily pause camera scans to prevent duplicates, then restart automatically
+                stopScanning();
+                setTimeout(() => {
+                    startScanning();
+                }, 1500); 
+            };
+
+            const config = { 
+                fps: 15, 
+                qrbox: (width, height) => {
+                    const minEdge = Math.min(width, height);
+                    const qrboxSize = Math.floor(minEdge * 0.65);
+                    return { width: qrboxSize, height: qrboxSize };
+                }
+            };
+
+            html5QrCode.start(
+                { facingMode: "environment" }, 
+                config, 
+                qrCodeSuccessCallback
+            )
+            .then(() => {
+                document.getElementById('btn-stop-camera').classList.remove('hidden');
+                document.getElementById('btn-stop-camera').classList.add('flex');
+                
+                // Show torch button only if camera supports it
+                if (html5QrCode.getRunningTrackCapabilities().torch) {
+                    document.getElementById('btn-toggle-torch').classList.remove('hidden');
+                    document.getElementById('btn-toggle-torch').classList.add('flex');
+                }
+            })
+            .catch((err) => {
+                console.error("Camera startup error:", err);
+                showToast("Gagal mengakses kamera. Mohon pastikan izin kamera diberikan.", "error");
+                stopScanning();
+            });
+        }
+
+        function stopScanning() {
+            if (html5QrCode && html5QrCode.isScanning) {
+                html5QrCode.stop().then(() => {
+                    document.getElementById('camera-idle-screen').classList.remove('hidden');
+                    document.getElementById('btn-stop-camera').classList.add('hidden');
+                    document.getElementById('btn-stop-camera').classList.remove('flex');
+                    document.getElementById('btn-toggle-torch').classList.add('hidden');
+                    document.getElementById('btn-toggle-torch').classList.remove('flex');
+                    isFlashOn = false;
+                }).catch(err => {
+                    console.error("Failed to stop scanning gracefully: ", err);
+                });
+            } else {
+                document.getElementById('camera-idle-screen').classList.remove('hidden');
+            }
+        }
+
+        function toggleFlash() {
+            if (html5QrCode && html5QrCode.isScanning) {
+                isFlashOn = !isFlashOn;
+                html5QrCode.applyVideoConstraints({
+                    advanced: [{ torch: isFlashOn }]
+                }).catch(err => {
+                    console.error("Failed to toggle flashlight: ", err);
+                    isFlashOn = !isFlashOn; // revert state
+                });
+            }
+        }
+
+        // File Scan Parser
+        function scanFromFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const fileHtml5QrCode = new Html5Qrcode("interactive-scanner");
+            
+            fileHtml5QrCode.scanFile(file, true)
+                .then(decodedText => {
+                    playSuccessBeep();
+                    
+                    // Display on File Tab UI
+                    const resultBox = document.getElementById('file-result-box');
+                    const contentEl = document.getElementById('file-scanned-content');
+                    const openLinkEl = document.getElementById('btn-file-open-link');
+                    
+                    contentEl.innerText = decodedText;
+                    resultBox.classList.remove('hidden');
+                    
+                    // Link checking
+                    if (isValidURL(decodedText)) {
+                        openLinkEl.href = decodedText;
+                        openLinkEl.classList.remove('hidden');
+                        openLinkEl.classList.add('flex');
+                    } else {
+                        openLinkEl.classList.add('hidden');
+                        openLinkEl.classList.remove('flex');
+                    }
+
+                    // Save to local and upload
+                    saveToHistory(decodedText);
+                    sendDataToAppsScript(decodedText);
+                    showToast("QR File Berhasil Dipindai!", "success");
+                })
+                .catch(err => {
+                    console.error("File scanning error: ", err);
+                    showToast("Tidak dapat menemukan QR Code valid pada gambar ini.", "error");
+                });
+        }
+
+        // Handle local data presentation
+        function displayScanResult(text) {
+            const resultBox = document.getElementById('latest-result-box');
+            const scannedContent = document.getElementById('scanned-content');
+            const openLinkBtn = document.getElementById('btn-open-link');
+            const timeEl = document.getElementById('scan-time');
+
+            scannedContent.innerText = text;
+            timeEl.innerText = new Date().toLocaleTimeString('id-ID');
+            resultBox.classList.remove('hidden');
+
+            if (isValidURL(text)) {
+                openLinkBtn.href = text;
+                openLinkBtn.classList.remove('hidden');
+                openLinkBtn.classList.add('flex');
+            } else {
+                openLinkBtn.classList.add('hidden');
+                openLinkBtn.classList.remove('flex');
+            }
+        }
+
+        // Audio synthesizer feedback
+        function playSuccessBeep() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                
+                osc.frequency.setValueAtTime(880, ctx.currentTime); // Frequency note A5
+                gain.gain.setValueAtTime(0.12, ctx.currentTime); // Soft volume
+                
+                osc.start();
+                osc.stop(ctx.currentTime + 0.15); // Beep duration 150ms
+            } catch(e) {
+                console.log("Audio feedback error or blocked by browser:", e);
+            }
+        }
+
+        // Validate URLs to enable "Open Link" safely
+        function isValidURL(string) {
+            try {
+                new URL(string);
+                return true;
+            } catch (_) {
+                return false;  
+            }
+        }
+
+        // Connection & Saving Configuration
+        function setConnectionMode(mode) {
+            connectionMode = mode;
+            localStorage.setItem('qr_connection_mode', mode);
+
+            const sBtn = document.getElementById('mode-standalone-btn');
+            const nBtn = document.getElementById('mode-native-btn');
+            const urlContainer = document.getElementById('url-input-container');
+            const badge = document.getElementById('connection-badge');
+
+            if (mode === 'standalone') {
+                sBtn.className = "p-3 border-2 border-indigo-600 dark:border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 rounded-xl text-left font-medium text-sm flex items-center gap-2 text-indigo-700 dark:text-indigo-400 transition-all";
+                nBtn.className = "p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-left font-medium text-sm flex items-center gap-2 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all";
+                urlContainer.classList.remove('hidden');
+                
+                if (endpointUrl) {
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span><span>Mode Cloud (Standalone)</span>`;
+                    badge.className = "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-400";
+                } else {
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500"></span><span>URL Belum Diatur</span>`;
+                    badge.className = "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400";
+                }
+            } else {
+                nBtn.className = "p-3 border-2 border-indigo-600 dark:border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 rounded-xl text-left font-medium text-sm flex items-center gap-2 text-indigo-700 dark:text-indigo-400 transition-all";
+                sBtn.className = "p-3 border border-slate-200 dark:border-slate-700 rounded-xl text-left font-medium text-sm flex items-center gap-2 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all";
+                urlContainer.classList.add('hidden');
+                
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span><span>Mode Apps Script Container</span>`;
+                badge.className = "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-400";
+            }
+        }
+
+        function saveEndpointURL() {
+            const urlInput = document.getElementById('gas-endpoint-url').value.trim();
+            if (urlInput && !isValidURL(urlInput)) {
+                showToast("Masukkan URL Google Apps Script yang valid!", "error");
+                return;
+            }
+            endpointUrl = urlInput;
+            localStorage.setItem('qr_endpoint_url', urlInput);
+            showToast("URL Endpoint Google Sheets berhasil disimpan!", "success");
+            setConnectionMode(connectionMode); // Refresh UI
+        }
+
+        // Bridge to send data to Apps Script Backend
+        function sendDataToAppsScript(data) {
+            if (connectionMode === 'native') {
+                // If running natively inside Google Sheet's Apps Script iframe
+                if (typeof google !== 'undefined' && google.script && google.script.run) {
+                    google.script.run
+                        .withSuccessHandler((res) => {
+                            if (res && res.success) {
+                                showToast("Berhasil terkirim ke Google Sheets (Native)!", "success");
+                            } else {
+                                showToast("Google Sheets Error: " + (res.error || "Gagal menyimpan"), "error");
+                            }
+                        })
+                        .withFailureHandler((err) => {
+                            showToast("Gagal terhubung ke Google Sheets: " + err, "error");
+                        })
+                        .saveScanToSheet(data);
+                } else {
+                    // Simulation mode fallback
+                    console.log("Mock: Google script native environment not active.");
+                    showToast("Simulasi: Data scan '" + (data.substring(0, 20)) + "...' direkam ke browser.", "success");
+                }
+            } else {
+                // Standalone mode with Web App URL integration
+                if (!endpointUrl) {
+                    showToast("Simulasi: Tersimpan lokal (Endpoint URL kosong)", "info");
+                    return;
+                }
+
+                // POST data using Fetch API
+                const payload = {
+                    qrData: data,
+                    timestamp: new Date().toISOString()
+                };
+
+                // Utilizing standard fetch with keepalive to guarantee execution
+                fetch(endpointUrl, {
+                    method: 'POST',
+                    mode: 'no-cors', // standard Apps Script POST bypass, response cannot be read due to redirect
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                })
+                .then(() => {
+                    showToast("Berhasil mengirim data ke Google Sheets!", "success");
+                })
+                .catch(err => {
+                    console.error("Apps Script request error: ", err);
+                    showToast("Gagal mengirim ke endpoint. Cek konsol browser Anda.", "error");
+                });
+            }
+        }
+
+        // Local Storage History Management
+        function saveToHistory(text) {
+            const newItem = {
+                id: Date.now(),
+                timestamp: new Date().toLocaleString('id-ID'),
+                content: text
+            };
+            scanHistory.unshift(newItem); // Add to beginning of array
+            localStorage.setItem('qr_scan_history', JSON.stringify(scanHistory));
+            updateHistoryUI();
+        }
+
+        function updateHistoryUI() {
+            const count = scanHistory.length;
+            document.getElementById('history-badge').innerText = count;
+
+            const emptyEl = document.getElementById('history-empty');
+            const listContainer = document.getElementById('history-list-container');
+            const tbody = document.getElementById('history-table-body');
+
+            if (count === 0) {
+                emptyEl.classList.remove('hidden');
+                listContainer.classList.add('hidden');
+            } else {
+                emptyEl.classList.add('hidden');
+                listContainer.classList.remove('hidden');
+                
+                tbody.innerHTML = '';
+                scanHistory.forEach(item => {
+                    const row = document.createElement('tr');
+                    row.className = "hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors";
+                    
+                    const isUrl = isValidURL(item.content);
+                    const actionButton = isUrl 
+                        ? `<a href="${item.content}" target="_blank" class="p-1.5 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 rounded hover:bg-indigo-50 dark:hover:bg-indigo-950/40 inline-flex items-center gap-1"><i data-lucide="external-link" class="w-4 h-4"></i> Buka</a>`
+                        : `<button onclick="copyToClipboard('${item.content}')" class="p-1.5 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 rounded hover:bg-indigo-50 dark:hover:bg-indigo-950/40 inline-flex items-center gap-1"><i data-lucide="copy" class="w-4 h-4"></i> Salin</button>`;
+
+                    row.innerHTML = `
+                        <td class="p-3 text-xs text-slate-500 font-medium">${item.timestamp}</td>
+                        <td class="p-3 font-semibold break-all text-xs text-slate-800 dark:text-slate-100 max-w-xs md:max-w-md">${item.content}</td>
+                        <td class="p-3 text-right whitespace-nowrap">${actionButton}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                lucide.createIcons();
+            }
+        }
+
+        function clearHistory() {
+            if (scanHistory.length === 0) return;
+            scanHistory = [];
+            localStorage.setItem('qr_scan_history', '[]');
+            updateHistoryUI();
+            showToast("Semua riwayat berhasil dihapus.", "success");
+        }
+
+        function exportHistoryToCSV() {
+            if (scanHistory.length === 0) {
+                showToast("Tidak ada data riwayat yang bisa diekspor.", "info");
+                return;
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "ID,Tanggal Waktu,Isi Data QR\n";
+
+            scanHistory.forEach(item => {
+                // Sanitize string quote characters to prevent breakages in CSV format
+                const cleanContent = item.content.replace(/"/g, '""');
+                csvContent += `"${item.id}","${item.timestamp}","${cleanContent}"\n`;
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `QR_Scan_History_${new Date().toISOString().slice(0,10)}.csv`);
+            document.body.appendChild(link); // Required for FF
+
+            link.click();
+            document.body.removeChild(link);
+            showToast("File CSV berhasil diunduh!", "success");
+        }
+
+        // Clipboard Copy Utility
+        function copyToClipboard(text) {
+            // Replaced with fallback command due to potential iframe container issues inside apps script
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.top = "0";
+            textArea.style.left = "0";
+            textArea.style.position = "fixed";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    showToast("Teks berhasil disalin ke clipboard!", "success");
+                } else {
+                    showToast("Gagal menyalin teks.", "error");
+                }
+            } catch (err) {
+                showToast("Gagal menyalin teks: " + err, "error");
+            }
+            
+            document.body.removeChild(textArea);
+        }
+
+        function copyAppsScriptCode() {
+            const code = document.getElementById('apps-script-code-block').innerText;
+            copyToClipboard(code);
+        }
+
+        // Customized Toast System (replaces raw browser alerts)
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            
+            let colorClasses = 'bg-slate-900 text-white';
+            let iconName = 'info';
+
+            if (type === 'success') {
+                colorClasses = 'bg-green-600 text-white shadow-lg shadow-green-500/20';
+                iconName = 'check-circle-2';
+            } else if (type === 'error') {
+                colorClasses = 'bg-red-600 text-white shadow-lg shadow-red-500/20';
+                iconName = 'alert-triangle';
+            } else if (type === 'info') {
+                colorClasses = 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20';
+                iconName = 'info';
+            }
+
+            toast.className = `flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm font-medium transition-all transform translate-y-2 opacity-0 pointer-events-auto shadow-md ${colorClasses}`;
+            toast.innerHTML = `
+                <i data-lucide="${iconName}" class="w-4 h-4 shrink-0"></i>
+                <span>${message}</span>
+            `;
+
+            container.appendChild(toast);
+            lucide.createIcons();
+
+            // Trigger animation in next frame
+            requestAnimationFrame(() => {
+                toast.classList.remove('translate-y-2', 'opacity-0');
+            });
+
+            // Auto dismiss toast after 3.5 seconds
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => {
+                    toast.remove();
+                }, 300);
+            }, 3500);
+        }
+    </script>
+</body>
+</html>
